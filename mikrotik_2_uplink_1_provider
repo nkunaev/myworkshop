@@ -1,0 +1,99 @@
+Открываем /system/scripts добавляем новый скрипт
+
+Создаем локальные переменные
+
+#create local var's
+:local host 10.10.10.250
+:local checkswith [/ping $host count=3]
+:local counter
+:set $counter 0
+Создаем функцию-переключатель VLAN'ов с одного интерфейса на другой
+
+#create vlan's interface switcher
+:local changevlanint
+:set changevlanint do= {
+  [/interface/vlan/set vlan20 interface=$eth]    
+  [/interface/vlan/set vlan669 interface=$eth]
+  [/interface/vlan/set vlan3460 interface=$eth]
+  [/interface/vlan/set vlan3461 interface=$eth]
+  }
+/delay 3
+Делаем проверку на статус работы скрипта, чтобы одновременно не работало больше одного
+
+#Check amount of running scripts
+:if ([/len [/system/script/job find where script=check_connection]] > 1) do= {error "Script already running"};
+Получаем информацию о статусах интерфейсов
+
+#get state of interfaces
+:local checketh1 [/interface/get value-name=running number=0]
+:local checketh2 [/interface/get value-name=running number=1]
+:local int [/interface/pppoe-client/get value-name=interface pppoe-out1]
+/delay 3
+Делаем подстраховку на случай, если вдруг оба интерфейса выключены
+
+#default settings if something went wrong
+if (($checketh1 = false) and ($checketh2 = false)) do= {
+  /interface/enable ether1;
+  /interface/disable ether2;
+  /interface/pppoe-client/set pppoe-out1 interface=ether1;
+  :set [$changevlanint eth=ether1]
+}
+Делаем проверку состояния, если работает по дефолту(через 1й интерфейс)
+
+#If all OK, dont touch settings
+:if (($checkswith > 0) && ($int = "ether1") && ($checketh1 = true)) do= {
+  /log info "PPPoE is successfully working via ether1";
+  }
+ Ее можно закоментить, чтобы не забивала лог на микроте.
+Проверяем работу 1 и 2 интерфейса. Если с 1 интерфейса нет пинга, то переключаемся на второй и проверяем работу. Если пинг есть, то оставляем работу на 2м интерфейсе, иначе возвращаем изначальные настройки
+
+#Check Ether1 and Ether2 connections
+:if (($checkswith = 0) && ($int = "ether1") && ($checketh1 = true)) do= {
+  /log error "Coreswith is not responding for ping requests. Now turn off Ether1 and turn on Ether2";
+  /interface disable ether1;
+  /interface enable ether2;
+  /interface/pppoe-client/set pppoe-out1 interface=ether2;
+  :set [$changevlanint eth=ether2];
+  /log warning "Ether2 is turned on, now checking connection";
+  /delay 5;
+  :local checkswith [/ping $host count=3]
+      :if ($checkswith = 0) do= {
+          /log error "Problem not in Ether ports, return settings back";
+          /interface disable ether2;
+          /interface enable ether1;
+          /interface/pppoe-client/set pppoe-out1 interface=ether1;
+          :set [$changevlanint eth=ether1];
+          /log info "Settings returned back"
+          } else= {/log warning "Connection checked. PPPoE out is workong via ether2 now.";\
+           :global flag false
+           :local int [/interface/pppoe-client/get value-name=interface pppoe-out1]
+           }
+}
+
+Делаем проверку, что работает 2й интерфейс. Пока работает второй интерфейс и счетчик меньше 10 (это предохранитель), то переключаемся на 1й интерфейс и проверяем пинг. Если не работает, то переключаемся обратно на 2й интерфейс и ждем.
+
+#If Ether2 is UP, check main connection and try to turn all back
+:while (($int = "ether2") && ($counter < 10)&& ($checketh2 = true)) do= {
+  /delay 10; - это время задержки выполнения цикла в секундах. На примере Лобни стоит 3 часа (10800)
+  /log warning "Trying to check main link and turn all back";
+  /interface disable ether2;
+  /interface enable ether1;
+  /interface/pppoe-client/set pppoe-out1 interface=ether1;
+  :set [$changevlanint eth=ether1];
+  /delay 5;
+  :local checkswith [/ping $host count=3]
+      :if ($checkswith = 0) do={
+          /log warning "PPPoE via ether1 still doesn't work, turn settings back."
+          /interface disable ether1;
+          /interface enable ether2;
+          /interface/pppoe-client/set pppoe-out1 interface=ether2;
+          :set [$changevlanint eth=ether2];
+          :set $counter ($counter + 1); 
+          /log warning "Settings are turned back. Counter incrased by 1, now = $counter ,limit = 10"
+          } else= {
+              /log warning "PPPoE connection established via ether1. Default settings now.";
+              :global flag true;
+              :set int [/interface/pppoe-client/get value-name=interface pppoe-out1];
+          } 
+   }
+В конце не забываем добавить задание в планировщик (Sheduler) на выполнение скрипта.
